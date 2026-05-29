@@ -7,13 +7,16 @@ def _train_core(
         model: GPT, 
         num_steps: int, 
         next_batch: Callable,
+        evaluator: Callable | None = None,
+        eval_every: int = 50,
         lr: float = 3e-4, 
         weight_decay: float = 0.0, 
+        grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu"
 ):
     model.train()
-    model = model.to(device=device)
-    params = model.parameters()
+    model.to(device=device)
+    params = list(model.parameters())
     optim = torch.optim.AdamW(
         params = params,
         lr=lr, 
@@ -21,16 +24,28 @@ def _train_core(
     )
     
     losses = []
-    for _ in range(num_steps): 
+    if evaluator:
+        eval_losses = []
+    for step in range(num_steps): 
+        if evaluator is not None and (step % eval_every) == 0:
+            eval_losses.append(evaluator())
+
         optim.zero_grad() # set gradient info to 0 for each parameter tracked by optim
         xs, ys = next_batch()
         loss = compute_loss(model, xs, ys) # get loss on batch
         loss.backward() # populate gradients based on loss 
+        if grad_clip:
+            torch.nn.utils.clip_grad_norm_(
+                params, 
+                max_norm=grad_clip,
+            )
         optim.step() # take step based on gradients, hyperamaters, and algorithm
         losses.append(loss.item())
         
-    model.eval()
-    return losses
+    if evaluator: 
+        return losses, eval_losses
+    else: 
+        return losses
 
 def train(
         model: GPT, 
@@ -38,8 +53,11 @@ def train(
         num_steps: int, 
         batch_size: int,
         block_size: int,
+        evaluator: Callable | None = None,
+        eval_every: int = 50,
         lr: float = 3e-4, 
         weight_decay: float = 0.0, 
+        grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu"
 ):
     def next_batch(): 
@@ -53,8 +71,11 @@ def train(
         model = model,
         num_steps = num_steps, 
         next_batch=next_batch,
+        evaluator=evaluator,
+        eval_every=eval_every,
         lr = lr, 
         weight_decay = weight_decay,
+        grad_clip=grad_clip,
         device = device,
     )
 
@@ -66,7 +87,10 @@ def overfit_one_batch(
         batch_size: int,
         block_size: int,
         lr: float = 3e-4, 
+        evaluator: Callable | None = None,        
+        eval_every: int = 50,
         weight_decay: float = 0.0, 
+        grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu"
 ):
     xs, ys = get_batch(
@@ -79,10 +103,38 @@ def overfit_one_batch(
         model = model,
         num_steps = num_steps, 
         next_batch=lambda: (xs, ys),
+        evaluator=evaluator,
+        eval_every=eval_every,
         lr = lr, 
         weight_decay = weight_decay,
+        grad_clip=grad_clip,
         device = device,
     )
+
+
+def evaluate(
+        model: GPT, 
+        data: torch.Tensor, 
+        batch_size: int, 
+        block_size: int, 
+        num_batches: int = 10, 
+) -> float: 
+    model.eval()
+
+    tot_loss = 0.0
+    with torch.no_grad():
+        for _ in range(num_batches): 
+            xs, ys = get_batch(
+                data, 
+                batch_size=batch_size,
+                block_size=block_size,
+            )
+
+            loss = compute_loss(model, xs, ys).item()
+            tot_loss += loss
+
+    model.train()
+    return tot_loss/num_batches
 
 if __name__ == "__main__":
     data = load_text('input.txt')
@@ -98,14 +150,25 @@ if __name__ == "__main__":
         n_head = 4, 
         n_embd = 128
     )
+    batch_size = 32
     model = GPT(config)
+    evaluator = lambda: evaluate(
+        model=model,
+        data=val_data,
+        batch_size=batch_size,
+        block_size=config.block_size,
+        num_batches=10,
+    )
     
-    losses = train(
-        model = model,
-        data = encoded, 
-        num_steps = 200, 
-        batch_size = 32, 
-        block_size = config.block_size,
+    losses_train, losses_val = train(
+        model=model,
+        data=train_data, 
+        num_steps=200, 
+        batch_size=batch_size, 
+        block_size=config.block_size,
+        evaluator=evaluator,
     )
 
-    print(losses[::20])
+    print("Train losses: ", losses_train[::20])
+    print("Val losses: ", losses_val)
+

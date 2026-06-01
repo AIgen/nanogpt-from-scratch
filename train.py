@@ -1,4 +1,5 @@
 import torch
+import math
 from typing import Callable
 from nanogpt import GPT, GPTConfig, compute_loss
 from data import get_batch, load_text, build_vocab, encode, train_val_split
@@ -10,6 +11,7 @@ def _train_core(
         evaluator: Callable | None = None,
         eval_every: int = 50,
         lr: float = 3e-4, 
+        lr_fn: Callable | None = None,
         weight_decay: float = 0.0, 
         grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu"
@@ -17,12 +19,13 @@ def _train_core(
     model.train()
     model.to(device=device)
     params = list(model.parameters())
+
     optim = torch.optim.AdamW(
         params = params,
         lr=lr, 
         weight_decay=weight_decay,   
     )
-    
+
     losses = []
     if evaluator:
         eval_losses = []
@@ -31,6 +34,8 @@ def _train_core(
             eval_losses.append(evaluator())
 
         optim.zero_grad() # set gradient info to 0 for each parameter tracked by optim
+        if lr_fn is not None: 
+            optim.param_groups[0]['lr'] = lr_fn(step)
         xs, ys = next_batch()
         loss = compute_loss(model, xs, ys) # get loss on batch
         loss.backward() # populate gradients based on loss 
@@ -56,6 +61,7 @@ def train(
         evaluator: Callable | None = None,
         eval_every: int = 50,
         lr: float = 3e-4, 
+        lr_fn: Callable | None = None,
         weight_decay: float = 0.0, 
         grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu"
@@ -74,6 +80,7 @@ def train(
         evaluator=evaluator,
         eval_every=eval_every,
         lr = lr, 
+        lr_fn = lr_fn,
         weight_decay = weight_decay,
         grad_clip=grad_clip,
         device = device,
@@ -135,6 +142,23 @@ def evaluate(
 
     model.train()
     return tot_loss/num_batches
+
+
+def cosine_lr(
+        step: int, 
+        total_steps: int, 
+        warmup_steps: int,
+        lr_min: float, 
+        lr_max: float, 
+) -> float: 
+    if step < warmup_steps: 
+        return lr_min + (step/warmup_steps) * (lr_max-lr_min)
+    if step >= total_steps: 
+        return lr_min
+    
+    step_shift = step - warmup_steps
+    tot_step_shift = total_steps - warmup_steps
+    return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * step_shift/tot_step_shift))
 
 if __name__ == "__main__":
     data = load_text('input.txt')

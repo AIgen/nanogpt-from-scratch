@@ -2,7 +2,7 @@ import torch
 import math
 from typing import Callable
 from nanogpt import GPT, GPTConfig, compute_loss
-from data import get_batch, load_text, build_vocab, encode, train_val_split
+from data import get_batch, load_text, build_vocab, encode, train_val_split, decode
 
 def _train_core(
         model: GPT, 
@@ -10,6 +10,8 @@ def _train_core(
         next_batch: Callable,
         evaluator: Callable | None = None,
         eval_every: int = 50,
+        sampler: Callable | None = None,
+        sample_every: int = 500,
         lr: float = 3e-4, 
         lr_fn: Callable | None = None,
         weight_decay: float = 0.0, 
@@ -32,6 +34,8 @@ def _train_core(
     for step in range(num_steps): 
         if evaluator is not None and (step % eval_every) == 0:
             eval_losses.append(evaluator())
+        if sampler is not None and (step % sample_every) == 0:
+            sampler(step)
 
         optim.zero_grad() # set gradient info to 0 for each parameter tracked by optim
         if lr_fn is not None: 
@@ -60,6 +64,8 @@ def train(
         block_size: int,
         evaluator: Callable | None = None,
         eval_every: int = 50,
+        sampler: Callable | None = None,
+        sample_every: int = 500,
         lr: float = 3e-4, 
         lr_fn: Callable | None = None,
         weight_decay: float = 0.0, 
@@ -81,8 +87,10 @@ def train(
         eval_every=eval_every,
         lr = lr, 
         lr_fn = lr_fn,
+        sampler = sampler,
+        sample_every = sample_every,
         weight_decay = weight_decay,
-        grad_clip=grad_clip,
+        grad_clip = grad_clip,
         device = device,
     )
 
@@ -160,6 +168,38 @@ def cosine_lr(
     tot_step_shift = total_steps - warmup_steps
     return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * step_shift/tot_step_shift))
 
+
+def sample_from_model(
+        step: int,
+        model: GPT,
+        num_samples: int,
+        num_tokens: int,
+        itos: dict,
+        temperature: float | None = None,
+        device: torch.device | str | None = None,
+):
+    if device is None:
+        device = 'cpu'
+    empty_tensor = torch.randint(
+        0, len(itos), 
+        size = (num_samples, 1), 
+        dtype=torch.int64, device=device
+    )
+    model.eval()
+    generation = model.generate(
+        idx=empty_tensor,
+        max_new_tokens=num_tokens,
+        temperature=temperature,
+    )
+    print(f"Step {step}:")
+    for i in range(num_samples):
+        decoded_string = decode(
+            generation[i],
+            itos,
+        )
+        print(decoded_string)
+
+        
 if __name__ == "__main__":
     data = load_text('input.txt')
     stoi, itos = build_vocab(data)
@@ -183,16 +223,31 @@ if __name__ == "__main__":
         block_size=config.block_size,
         num_batches=10,
     )
-    
+    sampler = lambda step: sample_from_model(
+        step=step,
+        model=model,
+        num_samples=5,
+        num_tokens=30,
+        itos=itos,
+        temperature=0.7, 
+    )
+    lr_fn = lambda step: cosine_lr(
+        step=step,
+        total_steps=2000,
+        warmup_steps=200,
+        lr_min=3e-4,
+        lr_max=3e-3,
+    )
     losses_train, losses_val = train(
         model=model,
         data=train_data, 
-        num_steps=200, 
+        num_steps=2000, 
         batch_size=batch_size, 
         block_size=config.block_size,
         evaluator=evaluator,
+        sampler=sampler,
+        lr_fn=lr_fn,
     )
 
     print("Train losses: ", losses_train[::20])
     print("Val losses: ", losses_val)
-

@@ -180,6 +180,7 @@ def sample_from_model(
 ):
     if device is None:
         device = 'cpu'
+
     empty_tensor = torch.randint(
         0, len(itos), 
         size = (num_samples, 1), 
@@ -229,7 +230,7 @@ if __name__ == "__main__":
         num_samples=5,
         num_tokens=30,
         itos=itos,
-        temperature=0.7, 
+        temperature=0.8, 
     )
     lr_fn = lambda step: cosine_lr(
         step=step,

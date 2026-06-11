@@ -13,6 +13,29 @@ class GPTConfig:
         n_embd: int
         dropout: float = 0.0
 
+# attention.py imports GPTConfig so we move it later
+# cleaner solution would be to move config to a separate file
+from attention import CausalSelfAttention
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, config: GPTConfig): 
+        super().__init__()
+        assert config.n_embd % 2 == 0 # for simplicity
+        self.n_embd = config.n_embd
+        self.max_length = config.block_size
+        wavelengths =  10000 ** (torch.arange(0, self.n_embd, 2)/self.n_embd)
+        pos = torch.arange(self.max_length).reshape(self.max_length, 1)
+        embeddings = torch.stack(
+            (torch.sin(pos / wavelengths), torch.cos(pos / wavelengths)), 
+            dim=-1
+        ).flatten(-2)
+        self.register_buffer("pe", embeddings, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+        seq_len = x.shape[-2]
+        x = x + self.pe[:seq_len]
+        return x
+
 class GPTEmbeddings(nn.Module): 
     def __init__(
             self, 
@@ -20,22 +43,18 @@ class GPTEmbeddings(nn.Module):
     ):
         super().__init__()
         self.tok_emb = nn.Embedding(
-            num_embeddings=config.vocab_size, 
+            num_embeddings=config.vocab_size,
             embedding_dim=config.n_embd
         )
-        self.pos_emb = nn.Embedding(
-            num_embeddings=config.block_size, 
-            embedding_dim=config.n_embd
-        )
+        self.pos_emb = SinusoidalPositionalEncoding(config)
         self.drop = nn.Dropout(config.dropout)
 
     def forward(self, idx: torch.Tensor):
-        seq_len = idx.shape[1]
-        assert seq_len <= self.pos_emb.num_embeddings
-        tok = self.tok_emb(idx)
-        positions = torch.arange(seq_len, device=idx.device)
-        pos = self.pos_emb(positions)
-        return self.drop(tok + pos)
+        seq_len = idx.shape[-1]
+        assert seq_len <= self.pos_emb.pe.shape[0]
+        x = self.tok_emb(idx)
+        x = self.pos_emb(x)
+        return self.drop(x)
     
 
 class Block(nn.Module):
@@ -46,7 +65,8 @@ class Block(nn.Module):
         super().__init__()
         n_embd = config.n_embd
         self.ln1 = nn.LayerNorm(n_embd)
-        self.attn = nn.Linear(n_embd, n_embd)
+        # self.attn = nn.Linear(n_embd, n_embd)
+        self.attn = CausalSelfAttention(config)
         self.ln2 = nn.LayerNorm(n_embd)
         self.mlp = nn.Sequential(
             nn.Linear(n_embd, 4*n_embd), 
@@ -107,7 +127,7 @@ class GPT(nn.Module):
                 generation[:, gen_pos] = self.forward(
                     generation[:, start_pos: gen_pos]
                 )[:, -1].argmax(dim=-1)
-            else: 
+            else:
                 generation[:, gen_pos] = torch.multinomial(
                     (
                         self.forward(
